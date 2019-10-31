@@ -1,0 +1,253 @@
+#manage packages
+if("pacman" %in% rownames(installed.packages()) == FALSE) {install.packages("pacman")} 
+pacman::p_load("caret","ROCR","lift","randomForest","readxl","dplyr","tidyverse","plyr","rfm","data.table","factoextra") 
+
+df<-read_excel("...")
+summary(df)
+
+#Data preparation ---------------------------------------------
+
+#change selected columns to facotrs
+change_to_factor<-function(df,list){
+  for (i in list){
+    column=which(names(df)==i)
+    df[,column]=lapply( df[,column],factor)
+  }
+  return(df)
+}
+list<-c('InvoiceNo','StockCode','Description','Country','CustomerID')
+df<-change_to_factor(df,list)
+
+#add a return dummy variable 
+df$return<-ifelse(df$Quantity<0,1,0) 
+
+#remove NA 
+df1<-df[(is.na(df$CustomerID)==FALSE), ] #406829 
+df1$total_amount<-df1$Quantity*df1$UnitPrice
+df1$InvoiceDate<-as.Date(df1$InvoiceDate,'%m/%d/%Y %H:%M',tz='UTC')
+analysis_date <- lubridate::as_date('2011-12-09', tz = 'UTC')
+
+#RFM Score----------------------------------------------------------------------------------------
+rfm_result <- rfm_table_order(df1, CustomerID, InvoiceDate, total_amount, analysis_date)
+summary(rfm_result) #4372 unique id 
+
+#Visualization of RFM
+rfm_heatmap(rfm_result)
+rfm_histograms(rfm_result)
+
+#scatter plot
+rfm_rm_plot(rfm_result)
+rfm_fm_plot(rfm_result)
+rfm_rf_plot(rfm_result)
+
+#data frame
+rfm_df<-data.frame(print(rfm_result))#4372
+setnames(rfm_df, old=c("recency_days","transaction_count","amount"), new=c("Recency","Frequency","Monetary"))
+
+#RFM EDA----------------------------------------
+#unique customer 4372
+
+#ourlier and skewness
+hist(rfm_df$Recency)
+hist(rfm_df$Frequency)
+hist(rfm_df$Monetary)
+
+#4372-->4317, 55 0 monetary customers are removed
+rfm_df<-subset(rfm_df, rfm_df$Monetary>0)  
+
+#log transformation
+rfm_df$Frequency_log<- log(rfm_df$Frequency)
+hist(rfm_df$Frequency_log)
+
+rfm_df$Monetary_log<- log(rfm_df$Monetary)
+hist(rfm_df$Monetary_log)
+
+#scale data----------------------------------------------------------------
+
+pre = preProcess(rfm_df, method="range")
+dat.scaled = predict(pre, rfm_df, method=c("range"))
+
+#elbow method-find optimal k------------------------------------------------
+set.seed(123)
+fviz_nbclust(dat.scaled [,c("Recency","Frequency_log","Monetary_log")],FUNcluster=hcut, method = "silhouette", k.max=12)
+fviz_nbclust(dat.scaled [,c("Recency","Frequency_log","Monetary_log")],FUNcluster=hcut, method = "wss", k.max=12)
+#the best k is 4
+
+#hierarchical clustering----------------------------------------------------------
+
+d<-dist(dat.scaled[,c("Recency","Frequency_log","Monetary_log")],method = 'euclidean')
+
+hclust_avg<- hclust(d,method='average')
+plot(hclust_avg)
+hclust_com<- hclust(d,method='complete')
+plot(hclust_com)
+hclust_ward<- hclust(d,method='ward.D2')
+plot(hclust_ward)
+hclust_single<-hclust(d,method='single')
+plot(hclust_single)
+
+#cut tree
+dat.scaled$cluster = cutree(hclust_ward, 4)
+rfm_df$cluster=cutree(hclust_ward, 4)
+
+#cluster stats
+hc_stats <- cluster.stats(d, dat.scaled$cluster)
+
+# (HCLUST) within clusters sum of squares
+hc_stats$within.cluster.ss
+
+# (HCLUST) cluster average silhouette widths
+hc_stats$clus.avg.silwidths
+
+#Cluster EDA---------------------------------------------------------------------------------------
+#install.packages("dendroextras")
+
+#visulization of 4 cluster in dendogram 
+library(dendroextras)
+c4=colour_clusters(hclust_ward,4,groupLabels=TRUE)
+plot(c4)
+
+#count of each cluster 
+table(dat.scaled$cluster)
+
+cluster_mean<-aggregate(rfm_df[-1], by=list(dat.scaled$cluster), mean) ##non scaled data
+ 
+# cluster_max<-aggregate(rfm_df[-1], by=list(dat.scaled$cluster), max)
+# cluster_min<-aggregate(rfm_df[-1], by=list(dat.scaled$cluster), min)
+
+#visulization of each cluster 
+library(knitr)
+require(reshape2)
+
+#unscaled data cluster bar chart
+df3<<-cbind(cluster_mean[1],cluster_mean[,c("Recency","Frequency","Monetary")],cluster_mean[12])
+
+dsClusters1 = melt(data.frame(df3), id=c('Group.1','cluster'))
+
+ggplot(dsClusters1, aes(factor(cluster), value, fill=variable)) + geom_bar(stat='identity', position='dodge') +
+  xlab("Cluster") + ylab('Values')+ggtitle("Average value of each cluster group")
+
+#------------------------------------------------------------------------------------------
+library(sqldf)
+new<-sqldf("select*from df1 left join rfm_df on df1.CustomerID =rfm_df.customer_id")
+
+#4 cluster dataframe by transaction
+c1<- new[which(new$cluster == 1),]
+c2<- new[which(new$cluster == 2),]
+c3<- new[which(new$cluster == 3),]
+c4<- new[which(new$cluster == 4),]
+
+par(mfrow=c(1,3))
+boxplot(c2$Frequency,xlab="Cluster 2",ylab="Frequency",ylim=c(0,550))
+boxplot(c3$Frequency,xlab="Cluster 3",ylab="Frequency",ylim=c(0,550))
+boxplot(c4$Frequency,xlab="Cluster 4",ylab="Frequency",ylim=c(0,550))
+
+par(mfrow=c(1,3))
+boxplot(c2$Monetary,xlab="Cluster 2",ylab="Monetary",ylim=c(0,21000))
+boxplot(c3$Monetary,xlab="Cluster 3",ylab="Monetary",ylim=c(0,21000))
+boxplot(c4$Monetary,xlab="Cluster 4",ylab="Monetary",ylim=c(0,21000))
+
+par(mfrow=c(1,3))
+boxplot(c2$Recency,xlab="Cluster 2",ylab="Recency",ylim=c(0,380))
+boxplot(c3$Recency,xlab="Cluster 3",ylab="Recency",ylim=c(0,380))
+boxplot(c4$Recency,xlab="Cluster 4",ylab="Recency",ylim=c(0,380))
+
+par(mfrow=c(1,1))
+
+#return rate in cluster 
+sum(c1$return)/nrow(c1)
+sum(c2$return)/nrow(c2)
+sum(c3$return)/nrow(c3)
+sum(c4$return)/nrow(c4)
+
+return<-cbind(sum(c1$return),sum(c2$return),sum(c3$return),sum(c4$return))
+colnames(return)<-c("c1","c2","c3","c4")
+
+barplot(return, main="Number of returns in each cluster", 
+        xlab="Cluster",ylab="Number of returns")
+
+#------------------------------------------------------------------------------------
+#cluster 1 most /least popular
+c1_sell <- ddply(c1,.(StockCode), summarize, sumAmount= sum(total_amount), sumQuantity= sum(Quantity), nCustomer= length(unique(CustomerID)), nPurchase= length(unique(InvoiceNo)))
+
+#by quantity
+head(c1_sell[order(-c1_sell$sumQuantity),] )#stockcode=22197
+head(c1[c1$StockCode==22197,][3:6],1)
+head(c1_sell[order(c1_sell$sumQuantity),] )#stockcode=84347
+head(c1[c1$StockCode==84347,][3:6],1)
+
+#by number of customers
+head(c1_sell[order(-c1_sell$nCustomer),] )
+head(c1[c1$StockCode==22423,][3],1)
+head(c1_sell[order(c1_sell$nCustomer),] )
+head(c1[c1$StockCode=='10123C',][3],1)
+
+#by # of purchase 
+head(c1_sell[order(-c1_sell$nPurchase),] )
+head(c1[c1$StockCode=='85123A',][3],1)
+head(c1_sell[order(c1_sell$nPurchase),] )
+head(c1[c1$StockCode=="10123C",][3],1)
+
+#cluster 2--------------------------------------------
+c2_sell <- ddply(c2,.(StockCode), summarize, sumAmount= sum(total_amount), sumQuantity= sum(Quantity), nCustomer= length(unique(CustomerID)), nPurchase= length(unique(InvoiceNo)))
+
+#by quantity
+head(c2_sell[order(-c2_sell$sumQuantity),] )
+head(c2[c2$StockCode==16014,][3:6],1)
+head(c2_sell[order(c2_sell$sumQuantity),] )
+head(c2[c2$StockCode=='79323W',][3:6],1)
+
+#by number of customer 
+head(c2_sell[order(-c2_sell$nCustomer),] )
+head(c2[c2$StockCode==22423,][3],1)
+head(c2_sell[order(c2_sell$nCustomer),] )
+head(c2[c2$StockCode=='10124A',][3],1)
+
+#by # of purchase 
+head(c2_sell[order(-c2_sell$nPurchase),] )
+head(c2[c2$StockCode=='85123A',][3],1)
+head(c2_sell[order(c2_sell$nPurchase),] )
+head(c2[c2$StockCode=="10124A",][3],1)
+
+#cluster 3--------------------------------------------------------
+c3_sell <- ddply(c3,.(StockCode), summarize, sumAmount= sum(total_amount), sumQuantity= sum(Quantity), nCustomer= length(unique(CustomerID)), nPurchase= length(unique(InvoiceNo)))
+
+#by quantity
+head(c3_sell[order(-c3_sell$sumQuantity),] )
+head(c3[c3$StockCode==22197,][3],1)
+head(c3_sell[order(c3_sell$sumQuantity),] )
+head(c3[c3$StockCode=='47566B',][3],1)
+
+#by number of customer 
+head(c3_sell[order(-c3_sell$nCustomer),] )
+head(c3[c3$StockCode=='85123A',][3],1)
+head(c3_sell[order(c3_sell$nCustomer),] )
+head(c3[c3$StockCode==10120,][3],1)
+
+#by # of purchase 
+head(c3_sell[order(-c3_sell$nPurchase),] )
+head(c3[c3$StockCode=='85123A',][3],1)
+head(c3_sell[order(c3_sell$nPurchase),] )
+head(c3[c3$StockCode==10120,][3],1)
+
+#cluser 4--------------------------------------------------------------
+
+c4_sell <- ddply(c4,.(StockCode), summarize, sumAmount= sum(total_amount), sumQuantity= sum(Quantity), nCustomer= length(unique(CustomerID)), nPurchase= length(unique(InvoiceNo)))
+
+#by quantity
+head(c4_sell[order(-c4_sell$sumQuantity),] )
+head(c4[c4$StockCode==21212,][3],1)
+head(c4_sell[order(c4_sell$sumQuantity),] )
+head(c4[c4$StockCode==20703,][3],1)
+
+#by number of customer 
+head(c4_sell[order(-c4_sell$nCustomer),] )
+head(c4[c4$StockCode==22423,][3],1)
+head(c4_sell[order(c4_sell$nCustomer),] )
+head(c4[c4$StockCode==16010,][3],1)
+
+#by # of purchase 
+head(c4_sell[order(-c4_sell$nPurchase),] )
+head(c4[c4$StockCode=='85123A',][3],1)
+head(c4_sell[order(c4_sell$nPurchase),] )
+head(c4[c4$StockCode==16010,][3],1)
