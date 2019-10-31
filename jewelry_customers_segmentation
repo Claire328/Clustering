@@ -1,0 +1,155 @@
+#load packages
+if("pacman" %in% rownames(installed.packages()) == FALSE) {install.packages("pacman")} 
+pacman::p_load("dbscan","amap","stylo","corrplot","extrafont")
+
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(ggthemes)
+library(caret)
+library(cluster) # For preprocessing
+library(factoextra) # for elbow plots
+library(amap) # For distance metrics
+library(stylo) # For cosine distance
+loadfonts(quiet = T)
+
+#load data
+dat <- read_csv("...")
+
+str(dat)
+summary(dat) #all numerical numbers
+
+corrplot.mixed(cor(dat[ , c(1:4)]), upper="ellipse") 
+
+#create plot function
+#plot income vs spending score
+plotClust = function(df, colorCol) {
+  ggplot(df, aes(x=Income, y=SpendingScore)) + 
+    geom_point(aes(color=factor(colorCol)), size=3) +
+    geom_rangeframe() + 
+    theme_tufte(base_family="Calibri") + 
+    #theme(legend.position="none") + 
+    theme(axis.title.x = element_text(colour="grey20",size=15,face="plain")) + 
+    theme(axis.title.y = element_text(colour="grey20",size=15,face="plain")) + 
+    theme(axis.text.x = element_text(colour="grey20",size=10,face="plain")) + 
+    theme(axis.text.y = element_text(colour="grey20",size=10,face="plain")) +
+    labs(x = "Income", y ="Spending Score") 
+}
+
+#scaling
+names(dat)
+summary(dat) #spending score doesnt need to be scaled
+grep("SpendingScore",colnames(dat))
+
+pre = preProcess(dat[,c(1:2,4)], method="range")
+dat.scaled = predict(pre, dat, method=c("range"))
+summary(dat.scaled)
+
+head(dat.scaled)
+dat.scaled %>%
+  select(Age, Income, SpendingScore,Savings) %>%
+  head(n=15)
+
+# Playing with Distance Metrics - returns disctances between instances 
+df = dat.scaled
+dd_euc = as.matrix(Dist(df, method = "euclidean"))
+dd_man = as.matrix(Dist(df, method = "manhattan"))
+dd_cos = as.matrix(dist.cosine(as.matrix(df)))
+
+dd_euc2 = as.matrix(Dist(df[c(1:3),], method = "euclidean"))#first 3, as a check
+
+# Check out the three closest and farthest people from Customer ID 1
+print("euc")
+n = ncol(dd_euc) #n is number of instances 
+idx = order(dd_euc[1,])[2:4] #rank distance ascending order then find the lowest 3
+idx
+dd_euc[1, idx]
+df[c(1, idx),]
+idx_long = order(dd_euc[1,])[(n-2):n] #find the last (farthest) 3
+idx_long
+dd_euc[1, idx_long]
+df[c(1, idx_long),]
+
+print("man")
+n = ncol(dd_man)
+idx = order(dd_man[1,])[2:4]
+idx
+dd_man[1, idx]
+df[c(1, idx),]
+idx_long = order(dd_man[1,])[(n-2):n]
+idx_long
+dd_man[1, idx_long]
+df[c(1, idx_long),]
+
+print("cos")
+n = ncol(dd_cos)
+idx = order(dd_cos[1,])[2:4]
+idx
+dd_cos[1, idx]
+df[c(1, idx),]
+idx_long = order(dd_cos[1,])[(n-2):n]
+idx_long
+dd_cos[1, idx_long]
+df[c(1, idx_long),]
+
+#experiment different k for k-means
+set.seed(2333)
+clusters = kmeans(dat.scaled[,c(1:4)], centers=5, nstart=10)
+dat.scaled$kmeans5 = clusters$cluster
+clusters$tot.withinss
+plotClust(dat.scaled, clusters$cluster) #using the function set from begining 
+head(dat.scaled, n=15)
+clusters$centers
+clusters$size
+
+#k-means, try k=3
+clusters = kmeans(dat.scaled[,c(1:4)],centers=3,nstart=10)
+dat.scaled$kmeans3 = clusters$cluster
+clusters$tot.withinss
+head(dat.scaled, n=15)
+plotClust(dat.scaled, clusters$cluster)
+
+#k-means, try k=10
+clusters = kmeans(dat.scaled[,c(1:4)], centers=10, nstart=10)
+dat.scaled$kmeans10 = clusters$cluster
+clusters$tot.withinss
+plotClust(dat, clusters$cluster)
+
+#k-means, try k=4
+clusters = kmeans(dat.scaled[,c(1:4)], centers=4, nstart=10)
+dat.scaled$kmeans4 = clusters$cluster
+clusters$tot.withinss
+plotClust(dat, clusters$cluster)
+
+##k=4 or 5 is ideal
+
+## Elbow Plot
+set.seed(2333)
+fviz_nbclust(dat.scaled[,c("Income", "SpendingScore","Age","Savings")], kmeans, method = "silhouette", k.max=15)
+fviz_nbclust(dat.scaled[,c("Income", "SpendingScore","Age","Savings")], kmeans, method = "wss", k.max=15)
+fviz_nbclust(dat.scaled[,c("Income", "SpendingScore","Age","Savings")], hcut, method = "silhouette", k.max=15)
+fviz_nbclust(dat.scaled[,c("Income", "SpendingScore","Age","Savings")], hcut, method = "wss", k.max=15)
+
+## Which Distance Measure?
+df = dat.scaled[,c("Income", "SpendingScore","Age","Savings")]
+dd_euc = dist(df, method = "euclidean")
+dd_man = dist(df, method = "manhattan")
+dd_min = dist(df, method = "minkowski")
+
+k <- 4
+set.seed(2333)
+res = data.frame(method=character(), wss=numeric(), betweenss=numeric())
+
+clusters = kmeans(dd_euc, k, nstart=50)
+res = rbind(res, data.frame(method="euclidean", wss=clusters$tot.withinss, betweenness=clusters$betweenss))
+plotClust(df, clusters$cluster)
+
+clusters = kmeans(dd_man, k, nstart=50)
+res = rbind(res, data.frame(method="manhattan", wss=clusters$tot.withinss, betweenness=clusters$betweenss))
+plotClust(df, clusters$cluster)
+
+clusters = kmeans(dd_min, k, nstart=50)
+res = rbind(res, data.frame(method="minkowski", wss=clusters$tot.withinss, betweenness=clusters$betweenss))
+plotClust(df, clusters$cluster)
+
+res #put together result
